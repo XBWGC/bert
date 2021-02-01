@@ -101,23 +101,17 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
   logits = tf.nn.bias_add(logits, output_bias)
 
   logits = tf.reshape(logits, [batch_size, seq_length, 2])
-  logits = tf.transpose(logits, [2, 0, 1])
+  logits = tf.transpose(logits, [2, 0, 1], name='logits')
 
-  unstacked_logits = tf.unstack(logits, axis=0)
-
-  (start_logits, end_logits) = (unstacked_logits[0], unstacked_logits[1])
-
-  return (start_logits, end_logits)
+  return logits
 
 
 def model_fn_builder(bert_config, use_one_hot_embeddings, placeholders):
-  """Returns `model_fn` closure."""
-
   input_ids = placeholders["input_ids"]
   input_mask = placeholders["input_mask"]
   segment_ids = placeholders["segment_ids"]
 
-  (start_logits, end_logits) = create_model(
+  logits = create_model(
       bert_config=bert_config,
       is_training=False,
       input_ids=input_ids,
@@ -125,12 +119,7 @@ def model_fn_builder(bert_config, use_one_hot_embeddings, placeholders):
       segment_ids=segment_ids,
       use_one_hot_embeddings=use_one_hot_embeddings)
 
-  predictions = {
-      "start_logits": start_logits,
-      "end_logits": end_logits,
-  }
-
-  return predictions
+  return logits
 
 
 
@@ -146,7 +135,7 @@ def get_feed_dict(placeholders, shape):
   return feed_dict
 
 
-def main(_):
+def main():
   if os.path.exists(FLAGS.output_dir):
     shutil.rmtree(FLAGS.output_dir)
   tf.gfile.MakeDirs(FLAGS.output_dir)
@@ -155,26 +144,27 @@ def main(_):
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
+  graph = tf.get_default_graph()
+
   placeholders = {}
   shape = (FLAGS.batch_size, FLAGS.max_seq_length)
-  placeholders["input_ids"] = tf.placeholder(tf.int32, shape, name='input_ids')
-  placeholders["input_mask"] = tf.placeholder(tf.int32, shape, name='input_mask')
-  placeholders["segment_ids"] = tf.placeholder(tf.int32, shape, name='segment_ids')
-  predictions = model_fn_builder(
-      bert_config=bert_config,
-      use_one_hot_embeddings=False,
-      placeholders=placeholders)
+  with graph.as_default():
+    placeholders["input_ids"] = tf.placeholder(tf.int32, shape, name='input_ids')
+    placeholders["input_mask"] = tf.placeholder(tf.int32, shape, name='input_mask')
+    placeholders["segment_ids"] = tf.placeholder(tf.int32, shape, name='segment_ids')
+    logits = model_fn_builder(
+        bert_config=bert_config,
+        use_one_hot_embeddings=False,
+        placeholders=placeholders)
 
   feed_dict = get_feed_dict(placeholders, shape)
-  with tf.Session() as sess:
+  with tf.Session(graph=graph) as sess:
     sess.run(tf.global_variables_initializer())
-    output = sess.run(predictions, feed_dict)
-    for key in output.keys():
-      print(output[key].shape)
+    output = sess.run(logits, feed_dict)
+    print(output.shape)
 
     if FLAGS.frozen_pb:
-      output = [predictions['start_logits'], predictions['end_logits']]
-      graph_def = graph_util.convert_variables_to_constants(sess, sess.graph_def, output)
+      graph_def = graph_util.convert_variables_to_constants(sess, sess.graph_def, ['logits'])
       with tf.gfile.FastGFile(FLAGS.output_dir + '/bert_base.pb', mode='wb') as f:
         f.write(graph_def.SerializeToString())
     else:
@@ -185,13 +175,12 @@ def main(_):
       mask = tf.saved_model.utils.build_tensor_info(placeholders["input_mask"])
       seg  = tf.saved_model.utils.build_tensor_info(placeholders["segment_ids"])
 
-      start = tf.saved_model.utils.build_tensor_info(predictions["start_logits"])
-      end   = tf.saved_model.utils.build_tensor_info(predictions["end_logits"])
+      start = tf.saved_model.utils.build_tensor_info(logits)
 
       prediction_signature = (
           tf.saved_model.signature_def_utils.build_signature_def(
               inputs={'input_ids': ids, 'input_mask': mask, 'segment_ids': seg},
-              outputs={'start_logits': start, 'end_logits': end},
+              outputs={'logits': start},
               method_name=tf.saved_model.signature_constants
               .PREDICT_METHOD_NAME))
 
@@ -215,4 +204,4 @@ if __name__ == "__main__":
   flags.mark_flag_as_required("vocab_file")
   flags.mark_flag_as_required("bert_config_file")
   flags.mark_flag_as_required("output_dir")
-  tf.app.run()
+  main()
